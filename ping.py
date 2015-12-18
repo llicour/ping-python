@@ -21,11 +21,13 @@
 #
 #   Right click icon in lower left of screen, use Command Prompt (Admin)
 
-__date__ = "2014/02/27"
-__version__ = "v0.93"
+__date__ = "2015/12/18"
+__version__ = "v0.94"
 
 import sys
 import time
+import argparse
+import csv
 
 # -----------------------------------------------------------------------
 # A thread based polling service with pause and kill.
@@ -130,11 +132,13 @@ class PingService(object):
     """
 
     # provide a class-wide thread-safe message queue
-    msgs = []
+    msgs = []        # logs
+    queueMsg = []    # messages
 
-    def __init__(self, host, delay=1.0, its_dead_jim=4,
+    def __init__(self, host, name, delay=1.0, its_dead_jim=4,
                  verbose=True, persistent=False):
         self.host = host
+        self.name = name
         self.delay = delay
         self.verbose = verbose
         self.persistent = persistent
@@ -152,6 +156,9 @@ class PingService(object):
             self.log("ping socket cannot connect to %s: %s" % (host, ex[1]))
             self.sock.close()
             return
+
+    def queue(self, msg):
+        self.queueMsg.append(msg)
 
     def log(self, msg):
         if not self.verbose:
@@ -311,6 +318,25 @@ class PingService(object):
 
                 self.log(str)
 
+            info = [
+                  self.host,
+                  self.name,
+                  '.'.join([('%d' % ord(c)) for c in list(rbuf[12:16])]),
+                  len(rbuf),
+                  # inet_ntop not available on windows
+                  self.seq,
+                  self._isup,
+                  ]
+
+            # calculate rounttrip time
+            rtt = now - timestamp
+            rtt *= 1000
+            # note that some boxes that run python
+            # can't resolve milisecond time deltas ...
+            if rtt > 0:
+                info.append(rtt)
+                self.queue(info)
+
     def online(self):
         if not self.verbose:
             self.log("%s is up" % self.host)
@@ -325,25 +351,48 @@ class PingService(object):
 # ----------------------------------------------------------------------------
 # demonstrate PingService
 
-if __name__ == "__main__":
+# Main
+def main():
+    args = parse_args()
+
     import traceback
     import types
 
-    if len(sys.argv) < 2:
-        print "usage: python2 ping.py <ip>"
-        sys.exit(1)
-
-    ping_svc = PingService(sys.argv[1])
+    devices = []
+    with open(args.file, 'rb') as csvfile:
+        for dev in csv.reader(csvfile, delimiter=';', quotechar='"'):
+            if len(dev) == 1:
+                devices.append((dev[0], dev[0]))
+            else:
+                devices.append((dev[0], dev[1]))
 
     try:
-        ping_svc.start()
+        ping_svc = []
+        for device in devices:
+            svc = PingService(host=device[0], name=device[1], delay=args.delay, persistent=True)
+            ping_svc.append(svc)
+            svc.start()
 
         while len(Poll.thread_list()) > 0:
-            time.sleep(0.2)
+            time.sleep(args.scan)
 
             # print log messages
             while len(PingService.msgs) > 0:
-                print PingService.msgs.pop(0)
+                msg = PingService.msgs.pop(0)
+                if args.verbose:
+                    print msg
+
+            if len(PingService.queueMsg) > 0:
+                try:
+                    ts = time.time()
+                    with open(args.output, 'a') as output:
+                        while len(PingService.queueMsg) > 0:
+                            msg = PingService.queueMsg.pop(0)
+                            host = msg[1].replace(".", "_")
+                            output.write("%s%s%s.rtt %f %d\n" % (args.prefix, host, args.suffix, msg[6], ts))
+                except Exception, e:
+                    print e
+                    continue
 
     except KeyboardInterrupt:
         pass
@@ -353,9 +402,46 @@ if __name__ == "__main__":
         traceback.print_exception(t, v, tb)
 
     # note: all threads must be stopped before python will exit!
-    ping_svc.stop()
+    for svc in ping_svc:
+        svc.stop()
 
     sys.exit(0)
+
+
+# Arguments processing
+def parse_args():
+
+    parser = argparse.ArgumentParser(
+        description='multi threaded ping'
+    )
+    parser.add_argument('-v', '--verbose',
+                        action='store_true',
+                        help='Verbose output')
+    parser.add_argument("-D", "--scan",
+                       default=2,
+                       help="queue polling interval in seconds (default: 2)")
+    parser.add_argument("-d", "--delay",
+                       default=1.0,
+                       help="ping interval in seconds (default: 1)")
+    parser.add_argument("--prefix",
+                       default="",
+                       help="metric name prefix for graphite output (default: empty)")
+    parser.add_argument("--suffix",
+                       default="",
+                       help="metric name suffix for graphite output (default: empty)")
+    parser.add_argument("-f", "--file",
+                       default="hosts.csv",
+                       help="host list (default: host.csv). Format : ip or ip;name")
+    parser.add_argument("-o", "--output",
+                       default="output.txt",
+                       help="output file in graphite format (default: output.txt)")
+
+    args = parser.parse_args()
+    return(args)
+
+
+if __name__ == "__main__":
+    main()
 
 
 # ex: set tabstop=8 expandtab softtabstop=4 shiftwidth=4:
